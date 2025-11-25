@@ -1,83 +1,78 @@
 ﻿from typing import Optional
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QMessageBox
 
-from services.video_downloader import (
-    VideoDownloader,
-    DownloadTask,
-    DownloadTaskResult,
-    DownloadEventHandler,
-)
-from services.cookie_manager import CookieManager
+from services.download_pool_manager import DownloadPoolManager
+from services.video_downloader import DownloadTask, DownloadTaskResult, DownloadProgress
+from services.cookie_worker import CookieManagerAsync, CookieRunnable
 from core.utils import Logger
 
 logger = Logger("DownloadController")
 
 
 class DownloadController(QObject):
-    """Высокоуровневый контроллер загрузок для GUI."""
+    """Высокоуровневый контроллер загрузок для GUI. Работает через пул потоков."""
 
-    progress  = Signal(str)
-    finished  = Signal(bool)
+    # --- сигналы для UI ---
+    progress = Signal(str)          # текст в статус-бар
     task_done = Signal(DownloadTaskResult)
+    pool_status = Signal(int, int)  # активные, в очереди
+    finished = Signal(bool)         # True – всё успешно
+    cookie_progress = Signal(str)   # прогресс получения cookies
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
-        self._downloader = VideoDownloader(cookie_manager=CookieManager())
-        self._thread: Optional[QThread] = None
-        self._worker: Optional["DownloadWorker"] = None
-        self._tasks: list[DownloadTask] = []
-        self._cancelled = False
+
+        # --- пул параллельных загрузок ---
+        self.pool = DownloadPoolManager(max_threads=3)
+        self.pool.task_progress.connect(self._on_task_progress)
+        self.pool.task_finished.connect(self.task_done.emit)
+        self.pool.pool_status.connect(self.pool_status.emit)
+
+        # --- асинхронные cookies ---
+        self.cookie_async = CookieManagerAsync()
+        self._current_cookie_worker: Optional[CookieRunnable] = None
 
     # ---------- публичные методы ----------
     def start(self, tasks: list[DownloadTask]) -> None:
-        """Запустить загрузку в отдельном потоке."""
-        if self.is_running():
+        """Запустить загрузки в пуле."""
+        if self.pool.active_tasks or self.pool.queue:
             logger.warning("Загрузка уже запущена")
             return
 
-        self._cancelled = False
-        self._tasks = tasks
-
-        self._thread = QThread()
-        self._worker = DownloadWorker(self._downloader, tasks, self)
-        self._worker.moveToThread(self._thread)
-
-        self._thread.started.connect(self._worker.run)
-        self._worker.progress.connect(self.progress.emit)
-        self._worker.task_done.connect(self._on_task_done)
-        self._worker.finished.connect(self._on_finished)
-
-        self._thread.start()
-        logger.info("Загрузка запущена")
+        self.pool.add_tasks(tasks)
 
     def cancel(self) -> None:
-        """Отменить текущую загрузку."""
-        if self.is_running():
-            self._cancelled = True
-            self._downloader.cancel()
-            logger.info("Загрузка отменена пользователем")
+        """Отменить все загрузки."""
+        self.pool.cancel_all()
+        logger.info("Загрузки отменены пользователем")
 
-    def is_running(self) -> bool:
-        """Проверка, выполняется ли загрузка."""
-        return self._thread is not None and self._thread.isRunning()
+    def fetch_cookies_async(self) -> None:
+        """Получить cookies в фоне."""
+        if self._current_cookie_worker:
+            logger.debug("Cookies уже запрашиваются")
+            return
+        worker = self.cookie_async.fetch_cookies(use_cache=False)
+        worker.signals.progress.connect(self.cookie_progress.emit)
+        worker.signals.finished.connect(self._on_cookies_finished)
+        self._current_cookie_worker = worker
 
     # ---------- слоты ----------
-    def _on_task_done(self, result: DownloadTaskResult) -> None:
-        self.task_done.emit(result)
+    def _on_task_progress(self, index: int, progress: DownloadProgress):
+        """Пересылаем живой прогресс в UI."""
+        self.progress.emit(progress.message)
 
-    def _on_finished(self, success: bool) -> None:
-        if self._thread:
-            self._thread.quit()
-            self._thread.wait()
-            self._thread.deleteLater()
-            self._worker.deleteLater()
-            self._thread = None
-            self._worker = None
-        self.finished.emit(success and not self._cancelled)
+    def _on_cookies_finished(self, result):
+        """Cookies получены – можно обновить UI."""
+        self._current_cookie_worker = None
+        if result.success:
+            self.progress.emit(f"✅ Cookies обновлены через {result.source.value}")
+        else:
+            self.progress.emit("❌ Не удалось обновить cookies")
 
-    # ---------- реализация DownloadEventHandler ----------
+    # ---------- реализация DownloadEventHandler (для вызовов из пула) ----------
     def on_cookie_missing(self) -> bool:
+        """UI-запрос на разрешение работы без cookies."""
         reply = QMessageBox.question(
             None,
             "Продолжить без cookies?",
@@ -92,33 +87,3 @@ class DownloadController(QObject):
 
     def on_task_finished(self, result: DownloadTaskResult) -> None:
         self.task_done.emit(result)
-
-
-# ---------- рабочий поток ----------
-class DownloadWorker(QObject):
-    progress  = Signal(str)
-    task_done = Signal(DownloadTaskResult)
-    finished  = Signal(bool)
-
-    def __init__(
-        self,
-        downloader: VideoDownloader,
-        tasks: list[DownloadTask],
-        handler: DownloadEventHandler,
-        parent: Optional[QObject] = None,
-    ) -> None:
-        super().__init__(parent)
-        self.downloader = downloader
-        self.tasks = tasks
-        self.handler = handler
-
-    def run(self) -> None:
-        try:
-            for result in self.downloader.process_queue(self.tasks, self.handler):
-                self.task_done.emit(result)
-                self.progress.emit(result.message)
-            self.finished.emit(True)
-        except Exception as e:
-            logger.error(f"Ошибка в потоке загрузки: {e}", exc=True)
-            self.progress.emit(f"❌ Критическая ошибка: {e}")
-            self.finished.emit(False)

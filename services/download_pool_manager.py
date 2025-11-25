@@ -2,7 +2,7 @@
 from typing import List, Dict
 from collections import deque
 
-from models import DownloadTask
+from core.models import DownloadTask
 from services.single_download_worker import SingleDownloadRunnable
 from services.video_downloader import VideoDownloader
 from core.utils import Logger

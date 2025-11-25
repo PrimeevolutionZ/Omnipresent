@@ -3,14 +3,14 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QComboBox,
     QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QMessageBox, QFrame
 )
-from PySide6.QtCore import Qt, QThread, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QIcon
 
 from core.config import cfg, VIDEO_QUALITIES
 from core.utils import play_sound
 from ui.ui_qt_widgets import UrlInputRow
 from ui.download_controller import DownloadController
-from services.video_downloader import DownloadTask, DownloadTaskResult
+from services.video_downloader import DownloadTask, DownloadTaskResult, DownloadProgress
 
 
 class MainWindow(QMainWindow):
@@ -23,9 +23,14 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._controller = DownloadController(self)
+
+        # --- подключение новых сигналов ---
         self._controller.progress.connect(self.status_label.setText)
-        self._controller.finished.connect(self._on_download_finished)
+        self._controller.pool_status.connect(self._on_pool_status)
         self._controller.task_done.connect(self._on_task_done)
+        self._controller.finished.connect(self._on_download_finished)
+        self._controller.cookie_progress.connect(self.status_label.setText)
+
         self._load_settings()
         self._check_cookies_status()
 
@@ -90,7 +95,7 @@ class MainWindow(QMainWindow):
 
         self.btn_cookies = QPushButton("🔄 Обновить cookies")
         self.btn_cookies.setObjectName("SecondaryBtn")
-        self.btn_cookies.clicked.connect(self._manual_cookie_input)
+        self.btn_cookies.clicked.connect(self._on_update_cookies)
         lay.addWidget(self.btn_cookies)
 
         lay.addStretch()
@@ -175,11 +180,9 @@ class MainWindow(QMainWindow):
         if os.path.exists(log):
             os.startfile(log)
 
-    def _manual_cookie_input(self) -> None:
-        from services.cookie_manager import CookieManager
-        mgr = CookieManager()
-        mgr.try_auto_fetch()
-        self._check_cookies_status()
+    def _on_update_cookies(self) -> None:
+        """Запускаем фоновое обновление cookies."""
+        self._controller.fetch_cookies_async()
 
     # ---------- строки URL ----------
     def add_row(self) -> None:
@@ -190,8 +193,6 @@ class MainWindow(QMainWindow):
         row.text_started.connect(self._on_row_typing)
         self.rows_layout.addWidget(row)
         self.url_rows.append(row)
-
-        # Показываем/скрываем time_widget сразу после добавления
         QTimer.singleShot(0, lambda: row.toggle_time(self.cb_fragment.isChecked()))
 
     def _on_row_typing(self) -> None:
@@ -200,8 +201,6 @@ class MainWindow(QMainWindow):
 
     # ---------- фрагменты ----------
     def _toggle_fragments(self, show: bool) -> None:
-        """Включение/выключение виджетов времени для всех строк."""
-        print(f"[DEBUG] _toggle_fragments: show={show}, rows={len(self.url_rows)}")
         for row in self.url_rows:
             QTimer.singleShot(0, lambda r=row, s=show: r.toggle_time(s))
         QTimer.singleShot(10, self.scroll_content.adjustSize)
@@ -301,7 +300,11 @@ class MainWindow(QMainWindow):
 
     # ---------- слоты ----------
     def _on_task_done(self, result: DownloadTaskResult):
+        # можно добавить индивидуальные уведомления
         pass
+
+    def _on_pool_status(self, active: int, queued: int):
+        self.status_label.setText(f"Активно: {active}  |  В очереди: {queued}")
 
     def _on_download_finished(self, success: bool):
         self.btn_download.setDisabled(False)
@@ -319,7 +322,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.Yes | QMessageBox.No,
             )
             if ans == QMessageBox.Yes:
-                self._manual_cookie_input()
+                self._controller.fetch_cookies_async()
             self.status_label.setText("⚠️ Ошибка (см. логи)")
             play_sound(False)
 

@@ -1,6 +1,6 @@
 ﻿from PySide6.QtCore import QObject, Signal, QRunnable
 from typing import List, Optional
-from models import DownloadTask, DownloadTaskResult
+from core.models import DownloadTask, DownloadTaskResult
 from services.video_downloader import VideoDownloader, DownloadProgress
 from core.utils import Logger
 
