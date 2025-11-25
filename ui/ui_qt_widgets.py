@@ -61,13 +61,13 @@ class TimeSectionWidget(QWidget):
 
 class UrlInputRow(QWidget):
     """Строка: [Поле ввода URL] [Виджет времени (скрыт/показан)]"""
-    # Сигнал, когда пользователь начал вводить текст (чтобы добавить следующую строку)
     text_started = Signal()
 
     def __init__(self, index):
         super().__init__()
         self.layout = QHBoxLayout(self)
         self.layout.setContentsMargins(0, 5, 0, 5)
+        self.layout.setSpacing(10)
 
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText(f"Ссылка #{index + 1}")
@@ -87,7 +87,12 @@ class UrlInputRow(QWidget):
             self._emitted = True
 
     def toggle_time(self, show):
+        """Показать/скрыть виджет времени с обновлением layout."""
         self.time_widget.setVisible(show)
+        self.time_widget.updateGeometry()
+        self.updateGeometry()
+        if self.parent():
+            self.parent().updateGeometry()
 
     def get_url(self):
         return self.url_input.text().strip()

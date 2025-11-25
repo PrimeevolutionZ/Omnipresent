@@ -71,7 +71,7 @@ version = "2.0.0"
 url = "https://github.com/yourusername/omnipresent"
 license = "MIT license"
 author = "Prime_evolution"
-author_email = "your.email@example.com"
+author_email = "develop@eclips-team.ru"
 
 [tool.briefcase.app.omnipresent]
 formal_name = "Omnipresent"

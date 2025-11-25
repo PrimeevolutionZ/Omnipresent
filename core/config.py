@@ -2,7 +2,6 @@ import os
 import sys
 import json
 
-
 class Config:
     def __init__(self):
         self.base_dir = self._get_base_dir()
@@ -10,7 +9,7 @@ class Config:
         self.ffmpeg_path = os.path.join(self.base_dir, 'ffmpeg.exe')
         self.yt_dlp_path = os.path.join(self.base_dir, 'yt-dlp.exe')
         self.icon_path = os.path.join(self.base_dir, "ic.ico")
-        self.cookies_path = os.path.join(self.base_dir, "cookies.txt")  # Путь для ручных cookies
+        self.cookies_path = os.path.join(self.base_dir, "cookies.txt")
 
     @staticmethod
     def _get_base_dir():
@@ -47,3 +46,10 @@ class Config:
 
 # Глобальный экземпляр конфига
 cfg = Config()
+
+VIDEO_QUALITIES = {
+    "Авто": "bestvideo+bestaudio/best",
+    "1080p": "bestvideo*[height<=1080]+bestaudio/best",
+    "720p": "bestvideo*[height<=720]+bestaudio/best",
+    "2160p (4K)": "bestvideo*[height=2160]+bestaudio/best"
+}
