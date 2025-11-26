@@ -4,11 +4,12 @@ Entry-point для YouTube-Downloader.
 """
 
 import sys
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 # Импорт в порядке слоёв
-from core.utils import ensure_binaries
+from core.utils import check_binaries_status
 from core.config import cfg
+from ui.splash_screen import SplashScreen, DownloadWorker
 from ui.main_window import MainWindow
 
 # ---------- Тёмная тема (полностью) ----------
@@ -77,11 +78,61 @@ QScrollBar::handle:vertical {
 """
 
 
+def show_splash_and_download(app: QApplication) -> bool:
+    """
+    Показать окно загрузки и скачать компоненты
+    Returns: True если успешно, False если ошибка
+    """
+    splash = SplashScreen(cfg.icon_path)
+    splash.show()
+    app.processEvents()
+
+    # Создаем worker
+    worker = DownloadWorker()
+    success_flag = [True]
+    error_msg = [""]
+
+    def on_progress(msg, percent, detail):
+        splash.update_status(msg, percent, detail)
+
+    def on_finished(success, error):
+        success_flag[0] = success
+        error_msg[0] = error
+        if success:
+            splash.finish()
+        else:
+            splash.reject()
+
+    worker.progress.connect(on_progress)
+    worker.finished.connect(on_finished)
+    worker.start()
+
+    # Ждем завершения
+    worker.wait()
+
+    result = splash.exec()
+
+    if not success_flag[0]:
+        QMessageBox.critical(
+            None,
+            "Ошибка установки",
+            f"Не удалось загрузить необходимые компоненты:\n{error_msg[0]}\n\n"
+            "Проверьте подключение к интернету и попробуйте снова."
+        )
+        return False
+
+    return result == SplashScreen.Accepted
+
+
 def main() -> None:
-    ensure_binaries()
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
 
+    # Показываем splash screen и загружаем компоненты
+    if not show_splash_and_download(app):
+        sys.exit(1)
+
+    # Запускаем главное окно
     window = MainWindow()
     window.show()
 
