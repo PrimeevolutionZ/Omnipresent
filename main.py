@@ -86,41 +86,33 @@ def show_splash_and_download(app: QApplication) -> bool:
     splash.show()
     app.processEvents()
 
-    # Создаем worker
     worker = DownloadWorker()
-    success_flag = [True]
-    error_msg = [""]
+    result = {'success': True, 'error': ''}
 
     def on_progress(msg, percent, detail):
         splash.update_status(msg, percent, detail)
 
     def on_finished(success, error):
-        success_flag[0] = success
-        error_msg[0] = error
-        if success:
-            splash.finish()
-        else:
-            splash.reject()
+        result['success'] = success
+        result['error'] = error
+        splash.finish() if success else splash.reject()
 
     worker.progress.connect(on_progress)
     worker.finished.connect(on_finished)
     worker.start()
 
-    # Ждем завершения
-    worker.wait()
+    dialog_code = splash.exec()
 
-    result = splash.exec()
-
-    if not success_flag[0]:
+    if not result['success']:
         QMessageBox.critical(
             None,
             "Ошибка установки",
-            f"Не удалось загрузить необходимые компоненты:\n{error_msg[0]}\n\n"
+            f"Не удалось загрузить необходимые компоненты:\n{result['error']}\n\n"
             "Проверьте подключение к интернету и попробуйте снова."
         )
         return False
 
-    return result == SplashScreen.Accepted
+    return dialog_code == SplashScreen.Accepted
 
 
 def main() -> None:

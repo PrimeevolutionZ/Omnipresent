@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, Signal, QThread, QTime
 from PySide6.QtGui import QFont, QIcon
 import os
+import time
 
 
 class SplashScreen(QDialog):
@@ -30,7 +31,12 @@ class SplashScreen(QDialog):
         self._animation_timer.setInterval(50)  # 20 fps
         self._animation_timer.timeout.connect(self._animate_progress)
         self._animation_start_time = QTime()
-        self._animation_duration = 2500  # 2.5 секунды между вехами
+        self._animation_duration = 300  # 0.3 сек между вехами
+
+        # Защита от спама и отката
+        self._last_update_time = 0
+        self._min_update_interval = 50  # ms
+        self._max_progress = 0
 
         self._setup_ui()
         self._center_on_screen()
@@ -121,22 +127,35 @@ class SplashScreen(QDialog):
         self.move(x, y)
 
     def update_status(self, message: str, progress: int = None, detail: str = ""):
-        """Обновить статус загрузки"""
+        """Обновить статус загрузки с защитой от спама"""
+        current_time = time.time() * 1000
+        if current_time - self._last_update_time < self._min_update_interval:
+            return
+        self._last_update_time = current_time
+
         self.status_label.setText(message)
         if detail:
             self.detail_label.setText(detail)
+
         if progress is not None:
+            if progress <= self._max_progress:
+                return
+            self._max_progress = progress
             self.set_target_progress(progress)
         QApplication.processEvents()
 
     def set_target_progress(self, target_value: int):
         """Установить целевое значение прогресса с плавной анимацией"""
-        if target_value == self._target_progress:
+        if target_value <= self._target_progress:
             return
 
         self._animation_start_time = QTime.currentTime()
         self._current_progress = self.progress.value()
         self._target_progress = min(target_value, 100)
+
+        # Адаптивная длительность
+        diff = abs(self._target_progress - self._current_progress)
+        self._animation_duration = 200 if diff > 10 else 300
         self._animation_timer.start()
 
     def _animate_progress(self):
@@ -147,15 +166,11 @@ class SplashScreen(QDialog):
 
         progress_ratio = elapsed / self._animation_duration
         if progress_ratio >= 1.0:
-            # Анимация завершена
             self.progress.setValue(self._target_progress)
             self._animation_timer.stop()
             return
 
-        # Ease-in-out функция (Smoothstep) для плавной анимации
         eased = progress_ratio * progress_ratio * (3.0 - 2.0 * progress_ratio)
-
-        # Вычисляем текущее значение
         current_value = int(
             self._current_progress + (self._target_progress - self._current_progress) * eased
         )
@@ -166,7 +181,8 @@ class SplashScreen(QDialog):
         """Завершить загрузку с плавной финальной анимацией"""
         self.set_target_progress(100)
         self.status_label.setText("✅ Готово!")
-        QTimer.singleShot(1500, self.accept)  # 1.5 секунды на финал
+        if self.isVisible():
+            QTimer.singleShot(1500, self.accept)
 
 
 class DownloadWorker(QThread):
@@ -176,13 +192,19 @@ class DownloadWorker(QThread):
 
     def __init__(self):
         super().__init__()
+        self._min_signal_interval = 50  # ms
 
     def run(self):
-        """Выполнение загрузки"""
+        """Выполнение загрузки с ограничением скорости сигналов"""
         try:
             from core.utils import ensure_binaries_with_progress
+            last_emit_time = 0
             for msg, percent, detail in ensure_binaries_with_progress():
+                current_time = time.time() * 1000
+                if current_time - last_emit_time < self._min_signal_interval:
+                    continue
                 self.progress.emit(msg, percent, detail)
+                last_emit_time = current_time
             self.finished.emit(True, "")
         except Exception as e:
             self.finished.emit(False, str(e))

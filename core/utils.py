@@ -6,6 +6,9 @@ import platform
 import urllib.request
 import zipfile
 import logging
+import threading
+import queue
+import time
 from datetime import datetime
 from typing import Iterator, Tuple
 from .config import cfg
@@ -47,34 +50,51 @@ class Logger:
 
 
 # ---------- прогресс-загрузка ----------
-class DownloadProgressHook:
-    """Хук для отслеживания прогресса загрузки"""
-
-    def __init__(self):
-        self.total_size = 0
-        self.downloaded = 0
-
-    def __call__(self, block_num, block_size, total_size):
-        self.total_size = total_size
-        self.downloaded = block_num * block_size
-
-
-def _download_file_with_progress(url: str, dst: str, desc: str = "file") -> Iterator[Tuple[int, str]]:
-    """
-    Скачать файл с прогрессом
-    Yields: (percent, detail_message)
-    """
+def _download_with_progress(url: str, dst: str, desc: str = "file") -> Iterator[Tuple[int, str]]:
     try:
-        hook = DownloadProgressHook()
-        urllib.request.urlretrieve(url, dst, reporthook=hook)
+        # Пробуем сначала с requests (потоковая загрузка)
+        try:
+            import requests
+            response = requests.get(url, stream=True, timeout=30)
+            response.raise_for_status()
 
-        # Симуляция прогресса для плавной анимации
-        for i in range(0, 101, 5):
-            yield (i, f"Загружено {i}%")
-            # Добавим небольшую задержку для замедления (опционально)
-            # import time; time.sleep(0.01)
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            chunk_size = 8192
 
-        yield (100, "Загрузка завершена")
+            with open(dst, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+
+                        if total_size > 0:
+                            percent = min(int(downloaded * 100 / total_size), 99)
+                            mb = downloaded / (1024 * 1024)
+                            yield (percent, f"Загружено {mb:.1f} MB")
+                        else:
+                            # Если размер неизвестен, эмулируем прогресс
+                            mb = downloaded / (1024 * 1024)
+                            percent = min(int(mb * 2), 95)  # Примерно 50MB = 100%
+                            yield (percent, f"Загружено {mb:.1f} MB")
+
+            yield (100, f"Загрузка завершена ({mb:.1f} MB)")
+
+        except ImportError:
+            hook = type('Hook', (), {'total': 0, 'downloaded': 0})()
+
+            def progress_hook(block_num, block_size, total_size):
+                hook.total = total_size
+                hook.downloaded = block_num * block_size
+
+            urllib.request.urlretrieve(url, dst, reporthook=progress_hook)
+
+            # Симуляция прогресса
+            for i in range(0, 101, 10):
+                yield (i, f"Загружено {i}%")
+
+            yield (100, "Загрузка завершена")
+
     except Exception as e:
         yield (0, f"Ошибка: {e}")
 
@@ -123,6 +143,69 @@ def _unpack_ffmpeg(archive_path: str) -> Iterator[Tuple[int, str]]:
         yield (0, f"Ошибка распаковки: {e}")
 
 
+# ---------- новая версия update_yt_dlp ----------
+def update_yt_dlp_with_progress() -> Iterator[Tuple[int, str]]:
+    """Обновить yt-dlp с плавной анимацией прогресса на основе реального времени"""
+    if not os.path.exists(cfg.yt_dlp_path):
+        yield (0, "yt-dlp не найден")
+        return
+
+    result_queue = queue.Queue()
+
+    def run_update():
+        try:
+            process = subprocess.Popen(
+                [cfg.yt_dlp_path, "-U"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            )
+            output, _ = process.communicate(timeout=30)
+            result_queue.put(('finished', process.returncode, output))
+        except Exception as e:
+            result_queue.put(('error', str(e)))
+
+    thread = threading.Thread(target=run_update, daemon=True)
+    thread.start()
+
+    start_time = datetime.now()
+    stages = [
+        (0, 25, "Инициализация обновления..."),
+        (25, 50, "Проверка версии на сервере..."),
+        (50, 75, "Загрузка обновления..."),
+        (75, 95, "Применение обновления..."),
+        (95, 100, "Финализация..."),
+    ]
+
+    stage_index = 0
+    while thread.is_alive():
+        elapsed = (datetime.now() - start_time).total_seconds()
+        if elapsed > (stage_index + 1) * 0.6 and stage_index < len(stages) - 1:
+            stage_index += 1
+
+        start, end, stage_msg = stages[stage_index]
+        stage_progress = min((elapsed % 0.6) / 0.6, 1.0)
+        eased = stage_progress * stage_progress * (3.0 - 2.0 * stage_progress)
+        current_progress = start + int((end - start) * eased)
+        yield (current_progress, stage_msg)
+
+        try:
+            msg_type, *data = result_queue.get_nowait()
+            if msg_type == 'finished':
+                yield (100, "✅ Обновление завершено")
+                return
+            elif msg_type == 'error':
+                yield (0, f"❌ Ошибка: {data[0]}")
+                return
+        except queue.Empty:
+            pass
+        time.sleep(0.05)
+
+    thread.join(timeout=1)
+    yield (100, "✅ Обновление завершено")
+
+
 # ---------- публичные функции ----------
 def check_binaries_status() -> Tuple[bool, bool]:
     """
@@ -137,25 +220,21 @@ def check_binaries_status() -> Tuple[bool, bool]:
 
 def ensure_binaries_with_progress() -> Iterator[Tuple[str, int, str]]:
     """
-    Скачать необходимые бинарники с прогрессом
+    Скачать необходимые бинарники с плавным прогрессом
     Yields: (status_message, percent, detail)
     """
     os.makedirs(cfg.base_dir, exist_ok=True)
 
     yt_dlp_exists, ffmpeg_exists = check_binaries_status()
 
-    # Если всё есть - просто обновляем yt-dlp
+    # Если всё есть — обновляем yt-dlp
     if yt_dlp_exists and ffmpeg_exists:
-        yield ("🔄 Проверка обновлений...", 5, "Инициализация...")
-        yield ("🔄 Проверка обновлений...", 15, "Подключение к серверу...")
-        yield ("🔄 Обновление yt-dlp...", 60, "Это может занять несколько секунд")
-        try:
-            update_yt_dlp()
-            yield ("✅ Компоненты актуальны", 95, "Завершение...")
-            yield ("✅ Компоненты актуальны", 100, "Всё готово к работе")
-        except Exception as e:
-            yield ("✅ Компоненты готовы", 95, "Работаем с текущей версией")
-            yield ("✅ Компоненты готовы", 100, "Всё готово к работе")
+        yield ("🔄 Проверка обновлений...", 0, "Запуск...")
+        for progress, detail in update_yt_dlp_with_progress():
+            scaled = max(5, min(95, int(progress * 0.90)))
+            yield ("🔄 Обновление yt-dlp...", scaled, detail)
+        yield ("✅ Компоненты актуальны", 95, "Завершение...")
+        yield ("✅ Компоненты актуальны", 100, "Готово!")
         return
 
     total_steps = 0
@@ -164,48 +243,46 @@ def ensure_binaries_with_progress() -> Iterator[Tuple[str, int, str]]:
     if not ffmpeg_exists:
         total_steps += 1
 
-    current_step = 0
 
-    # yt-dlp - более детальная анимация
     if not yt_dlp_exists:
-        yield ("📥 Загрузка yt-dlp...", 10, "Подготовка...")
-        yield ("📥 Загрузка yt-dlp...", 20, "Подключение к серверу...")
-
         try:
             tmp = cfg.yt_dlp_path + ".tmp"
-            urllib.request.urlretrieve(YT_DLP_URL, tmp)
+
+            # Загрузка с промежуточными вехами
+            for percent, detail in _download_with_progress(YT_DLP_URL, tmp, "yt-dlp"):
+                # Масштабируем 0-100% -> 10-40%
+                progress = 10 + int(percent * 0.30)
+                yield ("📥 Загрузка yt-dlp...", progress, detail)
+
             os.rename(tmp, cfg.yt_dlp_path)
             os.chmod(cfg.yt_dlp_path, 0o755)
-
-            current_step += 1
-            progress = int((current_step / total_steps) * 45)
-            yield ("✅ yt-dlp загружен", progress, "~12 MB")
+            yield ("✅ yt-dlp загружен", 45, "~12 MB")
         except Exception as e:
             yield (f"❌ Ошибка загрузки yt-dlp", 0, str(e))
             return
 
-    # ffmpeg - более детальная анимация
-    if not ffmpeg_exists:
-        yield ("📥 Загрузка ffmpeg...", 50, "Подготовка...")
-        yield ("📥 Загрузка ffmpeg...", 55, "Подключение к серверам...")
-        yield ("📥 Загрузка ffmpeg...", 60, "Это может занять 1-2 минуты")
 
+    if not ffmpeg_exists:
         try:
             url = FFMPEG_URL.get(platform.system())
             if not url:
-                yield ("⚠️ ffmpeg недоступен для вашей ОС", 60, "")
+                yield ("⚠️ ffmpeg недоступен для вашей ОС", 50, "")
             else:
                 arch_path = os.path.join(cfg.base_dir, "ffmpeg.zip")
-                urllib.request.urlretrieve(url, arch_path)
 
-                yield ("📦 Распаковка ffmpeg...", 65, "~120 MB архив")
+                # Загрузка с промежуточными вехами
+                for percent, detail in _download_with_progress(url, arch_path, "ffmpeg"):
+                    # Масштабируем 0-100% -> 50-75%
+                    progress = 50 + int(percent * 0.25)
+                    yield ("📥 Загрузка ffmpeg...", progress, detail)
+
+                yield ("📦 Распаковка ffmpeg...", 75, "~120 MB архив")
 
                 # Распаковка с прогрессом
                 for percent, detail in _unpack_ffmpeg(arch_path):
-                    base_progress = 65 + int(percent * 0.25)
+                    base_progress = 75 + int(percent * 0.15)
                     yield ("📦 Распаковка ffmpeg...", base_progress, detail)
 
-                current_step += 1
                 yield ("✅ ffmpeg установлен", 90, "")
         except Exception as e:
             yield (f"❌ Ошибка установки ffmpeg", 50, str(e))
@@ -216,7 +293,7 @@ def ensure_binaries_with_progress() -> Iterator[Tuple[str, int, str]]:
 
 
 def ensure_binaries() -> None:
-    """Простая версия без прогресса (для обратной совместимости)"""
+    """Простая версия без прогресса"""
     for _ in ensure_binaries_with_progress():
         pass
 
