@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Entry-point для YouTube-Downloader.
 """
